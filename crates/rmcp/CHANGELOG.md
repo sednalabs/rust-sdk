@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0-beta.4](https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v3.0.0-beta.3...rmcp-v3.0.0-beta.4) - 2026-07-27
+
+### Fixed
+
+- accept namespaced discovery server information ([#1044](https://github.com/modelcontextprotocol/rust-sdk/pull/1044))
+
 ## [3.0.0-beta.3](https://github.com/modelcontextprotocol/rust-sdk/compare/rmcp-v3.0.0-beta.2...rmcp-v3.0.0-beta.3) - 2026-07-27
 
 ### Fixed
