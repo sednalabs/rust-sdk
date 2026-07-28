@@ -1,0 +1,19 @@
+error: duplicate effective tool name `shared`; first declared by `first`
+  --> tests/ui/tool_router_duplicate_explicit.rs:10:5
+   |
+10 |     #[tool(name = "shared")]
+   |     ^
+
+error: first declaration of `shared` is here
+ --> tests/ui/tool_router_duplicate_explicit.rs:8:8
+  |
+8 |     fn first(&self) {}
+  |        ^^^^^
+
+warning: unused import: `tool`
+ --> tests/ui/tool_router_duplicate_explicit.rs:1:19
+  |
+1 | use rmcp_macros::{tool, tool_router};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
