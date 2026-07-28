@@ -23,6 +23,3 @@ darling = { version = "0.23" }
 
 [features]
 local = []
-
-[dev-dependencies]
-trybuild = "1"
