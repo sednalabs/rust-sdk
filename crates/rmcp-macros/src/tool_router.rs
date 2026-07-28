@@ -7,7 +7,10 @@
 use darling::{FromMeta, ast::NestedMeta};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
-use syn::{Ident, ImplItem, ItemImpl, Visibility};
+use std::collections::HashMap;
+use syn::{Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Visibility, spanned::Spanned};
+
+use crate::tool::ToolAttribute;
 
 #[derive(FromMeta)]
 #[darling(default)]
@@ -29,6 +32,50 @@ impl Default for ToolRouterAttribute {
     }
 }
 
+fn tool_attribute(fn_item: &ImplItemFn) -> Option<&Attribute> {
+    fn_item.attrs.iter().find(|attr| {
+        attr.path()
+            .segments
+            .last()
+            .is_some_and(|seg| seg.ident == "tool")
+    })
+}
+
+fn effective_tool_name(tool_attr: &Attribute, handler: &Ident) -> syn::Result<String> {
+    let attribute = if tool_attr.meta.require_path_only().is_ok() {
+        ToolAttribute::default()
+    } else {
+        let attr_args = tool_attr.parse_args_with(NestedMeta::parse_meta_list)?;
+        ToolAttribute::from_list(&attr_args)?
+    };
+
+    Ok(attribute.name.unwrap_or_else(|| handler.to_string()))
+}
+
+fn reject_duplicate_effective_tool_names(tool_attr_fns: &[(&Ident, &Attribute)]) -> syn::Result<()> {
+    let mut declared_names = HashMap::with_capacity(tool_attr_fns.len());
+
+    for (handler, tool_attr) in tool_attr_fns {
+        let effective_name = effective_tool_name(tool_attr, handler)?;
+        if let Some((first_handler, first_span)) = declared_names.get(&effective_name) {
+            let mut error = syn::Error::new(
+                tool_attr.span(),
+                format!(
+                    "duplicate effective tool name `{effective_name}`; first declared by `{first_handler}`"
+                ),
+            );
+            error.combine(syn::Error::new(
+                *first_span,
+                format!("first declaration of `{effective_name}` is here"),
+            ));
+            return Err(error);
+        }
+        declared_names.insert(effective_name, (handler.to_string(), handler.span()));
+    }
+
+    Ok(())
+}
+
 pub fn tool_router(attr: TokenStream, input: TokenStream) -> syn::Result<TokenStream> {
     let attr_args = NestedMeta::parse_meta_list(attr)?;
     let ToolRouterAttribute {
@@ -43,23 +90,15 @@ pub fn tool_router(attr: TokenStream, input: TokenStream) -> syn::Result<TokenSt
         .iter()
         .filter_map(|item| {
             if let syn::ImplItem::Fn(fn_item) = item {
-                fn_item
-                    .attrs
-                    .iter()
-                    .any(|attr| {
-                        attr.path()
-                            .segments
-                            .last()
-                            .is_some_and(|seg| seg.ident == "tool")
-                    })
-                    .then_some(&fn_item.sig.ident)
+                tool_attribute(fn_item).map(|attr| (&fn_item.sig.ident, attr))
             } else {
                 None
             }
         })
         .collect();
+    reject_duplicate_effective_tool_names(&tool_attr_fns)?;
     let mut routers = Vec::with_capacity(tool_attr_fns.len());
-    for handler in tool_attr_fns {
+    for (handler, _) in tool_attr_fns {
         let tool_attr_fn_ident = format_ident!("{handler}_tool_attr");
         routers.push(quote! {
             .with_route((Self::#tool_attr_fn_ident(), Self::#handler))
