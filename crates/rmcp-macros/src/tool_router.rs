@@ -4,11 +4,12 @@
 //! `#[::rmcp::tool_handler]` so `tool_handler` expands in a later proc-macro pass—keeping all
 //! tool dispatch and `get_info` logic in `tool_handler.rs` without duplicating it here.
 
+use std::collections::HashMap;
+
 use darling::{FromMeta, ast::NestedMeta};
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
-use std::collections::HashMap;
-use syn::{Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Visibility, spanned::Spanned};
+use syn::{spanned::Spanned, Attribute, Ident, ImplItem, ImplItemFn, ItemImpl, Visibility};
 
 use crate::tool::ToolAttribute;
 
@@ -52,7 +53,9 @@ fn effective_tool_name(tool_attr: &Attribute, handler: &Ident) -> syn::Result<St
     Ok(attribute.name.unwrap_or_else(|| handler.to_string()))
 }
 
-fn reject_duplicate_effective_tool_names(tool_attr_fns: &[(&Ident, &Attribute)]) -> syn::Result<()> {
+fn reject_duplicate_effective_tool_names(
+    tool_attr_fns: &[(&Ident, &Attribute)],
+) -> syn::Result<()> {
     let mut declared_names = HashMap::with_capacity(tool_attr_fns.len());
 
     for (handler, tool_attr) in tool_attr_fns {
@@ -175,5 +178,66 @@ mod test {
         assert_eq!(router.to_string(), "custom_router");
         assert!(server_handler);
         Ok(())
+    }
+
+    #[test]
+    fn tool_router_rejects_duplicate_explicit_effective_names() {
+        let error = tool_router(
+            quote! {},
+            quote! {
+                impl Handler {
+                    #[tool(name = "shared")]
+                    fn first(&self) {}
+
+                    #[tool(name = "shared")]
+                    fn second(&self) {}
+                }
+            },
+        )
+        .expect_err("duplicate explicit names must be rejected during macro expansion");
+
+        assert_eq!(
+            error.to_string(),
+            "duplicate effective tool name `shared`; first declared by `first`"
+        );
+    }
+
+    #[test]
+    fn tool_router_rejects_explicit_name_that_collides_with_implicit_name() {
+        let error = tool_router(
+            quote! {},
+            quote! {
+                impl Handler {
+                    #[tool(name = "shared")]
+                    fn explicit_name(&self) {}
+
+                    #[tool]
+                    fn shared(&self) {}
+                }
+            },
+        )
+        .expect_err("explicit and implicit duplicate names must be rejected during macro expansion");
+
+        assert_eq!(
+            error.to_string(),
+            "duplicate effective tool name `shared`; first declared by `explicit_name`"
+        );
+    }
+
+    #[test]
+    fn tool_router_accepts_unique_explicit_and_implicit_names() {
+        tool_router(
+            quote! {},
+            quote! {
+                impl Handler {
+                    #[tool(name = "renamed")]
+                    fn explicit_name(&self) {}
+
+                    #[tool]
+                    fn implicit_name(&self) {}
+                }
+            },
+        )
+        .expect("unique effective names must remain valid");
     }
 }
