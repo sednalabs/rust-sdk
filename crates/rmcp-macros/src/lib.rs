@@ -122,6 +122,44 @@ pub fn tool(attr: TokenStream, input: TokenStream) -> TokenStream {
 ///     }
 /// }
 /// ```
+///
+/// ### Duplicate effective names
+///
+/// Each router declaration must have a unique effective tool name. The effective name is the
+/// explicit `name` when present, otherwise the Rust method name. Duplicate names are rejected
+/// while the macro expands, before router construction can replace an earlier route.
+///
+/// ```compile_fail
+/// use rmcp_macros::{tool, tool_router};
+///
+/// struct Handler;
+///
+/// #[tool_router]
+/// impl Handler {
+///     #[tool(name = "shared")]
+///     fn first(&self) {}
+///
+///     #[tool(name = "shared")]
+///     fn second(&self) {}
+/// }
+/// ```
+///
+/// An explicit name cannot collide with another method's implicit name either:
+///
+/// ```compile_fail
+/// use rmcp_macros::{tool, tool_router};
+///
+/// struct Handler;
+///
+/// #[tool_router]
+/// impl Handler {
+///     #[tool(name = "shared")]
+///     fn renamed(&self) {}
+///
+///     #[tool]
+///     fn shared(&self) {}
+/// }
+/// ```
 #[proc_macro_attribute]
 pub fn tool_router(attr: TokenStream, input: TokenStream) -> TokenStream {
     tool_router::tool_router(attr.into(), input.into())

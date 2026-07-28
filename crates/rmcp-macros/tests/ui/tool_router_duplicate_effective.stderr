@@ -1,0 +1,11 @@
+error: duplicate effective tool name `shared`; first declared by `renamed`
+  --> tests/ui/tool_router_duplicate_effective.rs:11:5
+   |
+11 |     #[tool]
+   |     ^
+
+error: first declaration of `shared` is here
+ --> tests/ui/tool_router_duplicate_effective.rs:9:8
+  |
+9 |     fn renamed(&self) {}
+  |        ^^^^^^^

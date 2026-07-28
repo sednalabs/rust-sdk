@@ -1,0 +1,11 @@
+error: duplicate effective tool name `shared`; first declared by `first`
+  --> tests/ui/tool_router_duplicate_explicit.rs:11:5
+   |
+11 |     #[tool(name = "shared")]
+   |     ^
+
+error: first declaration of `shared` is here
+ --> tests/ui/tool_router_duplicate_explicit.rs:9:8
+  |
+9 |     fn first(&self) {}
+  |        ^^^^^
