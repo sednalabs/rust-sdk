@@ -43,11 +43,18 @@ fn tool_attribute(fn_item: &ImplItemFn) -> Option<&Attribute> {
 }
 
 fn effective_tool_name(tool_attr: &Attribute, handler: &Ident) -> syn::Result<String> {
-    let attribute = if tool_attr.meta.require_path_only().is_ok() {
-        ToolAttribute::default()
-    } else {
-        let attr_args = tool_attr.parse_args_with(NestedMeta::parse_meta_list)?;
-        ToolAttribute::from_list(&attr_args)?
+    let attribute = match &tool_attr.meta {
+        syn::Meta::Path(_) => ToolAttribute::default(),
+        syn::Meta::List(list) => {
+            let attr_args = NestedMeta::parse_meta_list(list.tokens.clone())?;
+            ToolAttribute::from_list(&attr_args)?
+        }
+        syn::Meta::NameValue(_) => {
+            return Err(syn::Error::new_spanned(
+                tool_attr,
+                "tool attributes must use `#[tool]` or `#[tool(...)]` syntax",
+            ));
+        }
     };
 
     Ok(attribute.name.unwrap_or_else(|| handler.to_string()))
