@@ -1,3 +1,4 @@
+#[allow(unused_imports)]
 use rmcp_macros::{tool, tool_router};
 
 struct DuplicateEffectiveNames;

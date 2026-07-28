@@ -1,19 +1,11 @@
 error: duplicate effective tool name `shared`; first declared by `renamed`
-  --> tests/ui/tool_router_duplicate_effective.rs:10:5
+  --> tests/ui/tool_router_duplicate_effective.rs:11:5
    |
-10 |     #[tool]
+11 |     #[tool]
    |     ^
 
 error: first declaration of `shared` is here
- --> tests/ui/tool_router_duplicate_effective.rs:8:8
+ --> tests/ui/tool_router_duplicate_effective.rs:9:8
   |
-8 |     fn renamed(&self) {}
+9 |     fn renamed(&self) {}
   |        ^^^^^^^
-
-warning: unused import: `tool`
- --> tests/ui/tool_router_duplicate_effective.rs:1:19
-  |
-1 | use rmcp_macros::{tool, tool_router};
-  |                   ^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
