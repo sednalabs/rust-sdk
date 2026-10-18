@@ -1568,8 +1568,12 @@ where
         first: Option<ServerJsonRpcMessage>,
         receiver: tokio::sync::mpsc::Receiver<ServerJsonRpcMessage>,
         request_ct: CancellationToken,
+        allow_resume: bool,
     ) -> BoxResponse {
-        if let Some(event_store) = self.session_manager.event_store() {
+        // Event-store persistence enables Last-Event-ID replay, which is only
+        // supported for legacy protocol versions. Current requests must remain
+        // bound to their request-scoped cancellation lifecycle.
+        if allow_resume && let Some(event_store) = self.session_manager.event_store() {
             let stream = self.persisted_stateless_stream(first, receiver, request_ct, event_store);
             sse_stream_response(
                 stream,
@@ -1598,6 +1602,10 @@ where
         mut request: crate::model::JsonRpcRequest<ClientRequest>,
         parts: http::request::Parts,
     ) -> HttpResult<BoxResponse> {
+        let allow_resume = is_legacy_request(
+            Some(&ClientJsonRpcMessage::Request(request.clone())),
+            &parts.headers,
+        )?;
         let peer_info = Self::peer_info_for_stateless_request(&request, &parts.headers);
         request.request.extensions_mut().insert(parts);
         let (transport, mut receiver) =
@@ -1655,7 +1663,7 @@ where
             return jsonrpc_message_response(first, true);
         }
 
-        Ok(self.stateless_sse_response(Some(first), receiver, request_ct))
+        Ok(self.stateless_sse_response(Some(first), receiver, request_ct, allow_resume))
     }
 
     /// Returns a cached schema for known tools, otherwise constructs a service
@@ -1945,6 +1953,9 @@ where
         let request_uses_legacy_protocol = is_legacy_request(None, request.headers())?;
         let legacy_request = self.config.legacy_session_mode && request_uses_legacy_protocol;
         if !legacy_request {
+            if !request_uses_legacy_protocol {
+                return Ok(method_not_allowed_response());
+            }
             let Some(last_event_id) = request
                 .headers()
                 .get(HEADER_LAST_EVENT_ID)
@@ -2334,6 +2345,8 @@ where
             validate_standard_headers(&part.headers, &message, |name| self.tool_schema(name))?;
             validate_request_protocol_version_meta(&part.headers, &message)?;
             validate_required_protocol_meta(&self.config, &message)?;
+            let allow_resume = !self.config.legacy_session_mode
+                && is_legacy_request(Some(&message), &part.headers)?;
             let service = self
                 .get_service()
                 .map_err(internal_error_response("get service"))?;
@@ -2412,10 +2425,15 @@ where
                                 .body(Full::new(Bytes::from(body)).boxed())
                                 .expect("valid response"))
                         } else {
-                            Ok(self.stateless_sse_response(Some(message), receiver, request_ct))
+                            Ok(self.stateless_sse_response(
+                                Some(message),
+                                receiver,
+                                request_ct,
+                                allow_resume,
+                            ))
                         }
                     } else {
-                        Ok(self.stateless_sse_response(None, receiver, request_ct))
+                        Ok(self.stateless_sse_response(None, receiver, request_ct, allow_resume))
                     }
                 }
                 ClientJsonRpcMessage::Notification(_notification) => {

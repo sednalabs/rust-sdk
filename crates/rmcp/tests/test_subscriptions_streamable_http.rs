@@ -27,7 +27,11 @@ use rmcp::{
         StreamableHttpClientTransport,
         streamable_http_client::StreamableHttpClientTransportConfig,
         streamable_http_server::{
-            StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+            StreamableHttpServerConfig, StreamableHttpService,
+            session::{
+                EventStore, EventStoreError, EventStream, ServerSseMessage,
+                local::LocalSessionManager,
+            },
         },
     },
 };
@@ -39,6 +43,32 @@ struct HttpSubscriptionServer {
     cancelled: Arc<Notify>,
     started: Arc<Notify>,
     ending: ServerEnding,
+}
+
+#[derive(Clone)]
+struct TestEventStore {
+    writes: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl EventStore for TestEventStore {
+    async fn store_event(
+        &self,
+        _stream_id: &str,
+        _event: &ServerSseMessage,
+    ) -> Result<String, EventStoreError> {
+        Ok(format!(
+            "event-{}",
+            self.writes.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    async fn replay_events_after(
+        &self,
+        _last_event_id: &str,
+    ) -> Result<EventStream, EventStoreError> {
+        Ok(Box::pin(futures::stream::empty()))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -97,6 +127,7 @@ async fn spawn_server(
     Arc<Notify>,
     Arc<Notify>,
     Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
 ) {
     let cancellation_token = CancellationToken::new();
     let subscription_cancelled = Arc::new(Notify::new());
@@ -106,10 +137,16 @@ async fn spawn_server(
         started: subscription_started.clone(),
         ending,
     };
+    let event_store_writes = Arc::new(AtomicUsize::new(0));
+    let event_store = TestEventStore {
+        writes: event_store_writes.clone(),
+    };
+    let session_manager =
+        Arc::new(LocalSessionManager::default().with_event_store(Arc::new(event_store)));
     let service: StreamableHttpService<HttpSubscriptionServer, LocalSessionManager> =
         StreamableHttpService::new(
             move || Ok(server.clone()),
-            Default::default(),
+            session_manager,
             StreamableHttpServerConfig::default()
                 .with_legacy_session_mode(true)
                 .with_json_response(true)
@@ -150,12 +187,13 @@ async fn spawn_server(
         subscription_cancelled,
         subscription_started,
         get_requests,
+        event_store_writes,
     )
 }
 
 #[tokio::test]
 async fn modern_http_listen_uses_post_stream_and_cancels_by_closing_it() -> anyhow::Result<()> {
-    let (url, server_ct, subscription_cancelled, _, get_requests) =
+    let (url, server_ct, subscription_cancelled, _, get_requests, event_store_writes) =
         spawn_server(ServerEnding::ClientCancellation).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url.clone()),
@@ -193,6 +231,11 @@ async fn modern_http_listen_uses_post_stream_and_cancels_by_closing_it() -> anyh
         .await?;
     subscription.cancel().await?;
     tokio::time::timeout(Duration::from_secs(5), subscription_cancelled.notified()).await?;
+    assert_eq!(
+        event_store_writes.load(Ordering::Relaxed),
+        0,
+        "current-protocol SSE must not be retained for legacy replay"
+    );
 
     client.cancel().await?;
     server_ct.cancel();
@@ -201,7 +244,7 @@ async fn modern_http_listen_uses_post_stream_and_cancels_by_closing_it() -> anyh
 
 #[tokio::test]
 async fn modern_http_graceful_close_returns_final_listen_result() -> anyhow::Result<()> {
-    let (url, server_ct, _, _, _) = spawn_server(ServerEnding::Graceful).await;
+    let (url, server_ct, _, _, _, _) = spawn_server(ServerEnding::Graceful).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url),
     );
@@ -237,7 +280,7 @@ async fn modern_http_graceful_close_returns_final_listen_result() -> anyhow::Res
 
 #[tokio::test]
 async fn modern_http_stream_close_without_result_is_abrupt() -> anyhow::Result<()> {
-    let (url, server_ct, _, subscription_started, _) = spawn_server(ServerEnding::Abrupt).await;
+    let (url, server_ct, _, subscription_started, _, _) = spawn_server(ServerEnding::Abrupt).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url),
     );
@@ -270,7 +313,8 @@ async fn modern_http_stream_close_without_result_is_abrupt() -> anyhow::Result<(
 #[tokio::test]
 async fn modern_http_lifecycle_stays_sessionless_for_older_application_version()
 -> anyhow::Result<()> {
-    let (url, server_ct, _, _, get_requests) = spawn_server(ServerEnding::ClientCancellation).await;
+    let (url, server_ct, _, _, get_requests, _) =
+        spawn_server(ServerEnding::ClientCancellation).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url),
     );
@@ -293,7 +337,7 @@ async fn modern_http_lifecycle_stays_sessionless_for_older_application_version()
 
 #[tokio::test]
 async fn modern_http_get_and_delete_are_method_not_allowed_in_legacy_session_mode() {
-    let (url, server_ct, _, _, _) = spawn_server(ServerEnding::ClientCancellation).await;
+    let (url, server_ct, _, _, _, _) = spawn_server(ServerEnding::ClientCancellation).await;
     let client = reqwest::Client::new();
 
     for method in [reqwest::Method::GET, reqwest::Method::DELETE] {
