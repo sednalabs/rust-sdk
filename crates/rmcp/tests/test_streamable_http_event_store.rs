@@ -267,7 +267,7 @@ async fn restored_instance_replays_events_from_shared_store() -> anyhow::Result<
 }
 
 #[tokio::test]
-async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result<()> {
+async fn legacy_stateless_instance_replays_events_from_shared_store() -> anyhow::Result<()> {
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let event_store = Arc::new(InMemoryEventStore::default());
     let http = reqwest::Client::new();
@@ -284,7 +284,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
         .post(&url_a)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("MCP-Protocol-Version", "2025-11-25")
         .header("Mcp-Method", "tools/call")
         .header("Mcp-Name", "slow-progress")
         .body(
@@ -295,12 +295,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
                 "params":{
                     "name":"slow-progress",
                     "arguments":{},
-                    "_meta":{
-                        "progressToken":"progress-1",
-                        "io.modelcontextprotocol/protocolVersion":"2026-07-28",
-                        "io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0"},
-                        "io.modelcontextprotocol/clientCapabilities":{}
-                    }
+                    "_meta":{"progressToken":"progress-1"}
                 }
             }"#,
         )
@@ -318,7 +313,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
             let chunk = body
                 .next()
                 .await
-                .expect("response remains open until progress arrives")?;
+                .unwrap_or_else(|| panic!("response ended before progress arrived: {received}"))?;
             received.push_str(&String::from_utf8_lossy(&chunk));
             if let Some(event_id) = event_id_containing(&received, "notifications/progress") {
                 return Ok::<_, reqwest::Error>(event_id.to_owned());
@@ -355,7 +350,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
     let replay = http
         .get(&url_b)
         .header("Accept", "text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("MCP-Protocol-Version", "2025-11-25")
         .header("Last-Event-ID", progress_event_id)
         .send()
         .await?;
@@ -368,5 +363,26 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
 
     cancellation_b.cancel();
     server_b.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn current_protocol_stateless_get_does_not_replay_events() -> anyhow::Result<()> {
+    let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let event_store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::default());
+    let cancellation = CancellationToken::new();
+    let (url, server) = spawn_server(session_store, event_store, &cancellation, false).await?;
+
+    let replay = reqwest::Client::new()
+        .get(url)
+        .header("Accept", "text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Last-Event-ID", "legacy-event-id")
+        .send()
+        .await?;
+    assert_eq!(replay.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+
+    cancellation.cancel();
+    server.await?;
     Ok(())
 }

@@ -1505,8 +1505,11 @@ where
         first: Option<ServerJsonRpcMessage>,
         receiver: tokio::sync::mpsc::Receiver<ServerJsonRpcMessage>,
         request_ct: CancellationToken,
+        allow_resume: bool,
     ) -> BoxResponse {
-        if let Some(event_store) = self.session_manager.event_store() {
+        // Persisted stateless replay is only part of the legacy protocol.
+        // Current requests stay bound to this request's cancellation lifecycle.
+        if allow_resume && let Some(event_store) = self.session_manager.event_store() {
             let stream = self.persisted_stateless_stream(first, receiver, request_ct, event_store);
             sse_stream_response(
                 stream,
@@ -1535,6 +1538,10 @@ where
         mut request: crate::model::JsonRpcRequest<ClientRequest>,
         parts: http::request::Parts,
     ) -> HttpResult<BoxResponse> {
+        let allow_resume = is_legacy_request(
+            Some(&ClientJsonRpcMessage::Request(request.clone())),
+            &parts.headers,
+        )?;
         let request_meta_malformed = !request
             .request
             .get_meta()
@@ -1596,7 +1603,7 @@ where
             return jsonrpc_message_response(first, status);
         }
 
-        Ok(self.stateless_sse_response(Some(first), receiver, request_ct))
+        Ok(self.stateless_sse_response(Some(first), receiver, request_ct, allow_resume))
     }
 
     /// Returns the cached input schema for `name`, constructing a service once
@@ -1884,6 +1891,9 @@ where
         let request_uses_legacy_protocol = is_legacy_request(None, request.headers())?;
         let legacy_request = self.config.legacy_session_mode && request_uses_legacy_protocol;
         if !legacy_request {
+            if !request_uses_legacy_protocol {
+                return Ok(method_not_allowed_response());
+            }
             let Some(last_event_id) = request
                 .headers()
                 .get(HEADER_LAST_EVENT_ID)
@@ -2043,8 +2053,9 @@ where
             Err(response) => return Ok(response),
         };
 
-        let use_session =
-            self.config.legacy_session_mode && is_legacy_request(Some(&message), &part.headers)?;
+        let request_uses_legacy_protocol = is_legacy_request(Some(&message), &part.headers)?;
+        let use_session = self.config.legacy_session_mode && request_uses_legacy_protocol;
+        let allow_resume = !self.config.legacy_session_mode && request_uses_legacy_protocol;
 
         if use_session {
             // do we have a session id?
@@ -2347,10 +2358,15 @@ where
                                 .body(Full::new(Bytes::from(body)).boxed())
                                 .expect("valid response"))
                         } else {
-                            Ok(self.stateless_sse_response(Some(message), receiver, request_ct))
+                            Ok(self.stateless_sse_response(
+                                Some(message),
+                                receiver,
+                                request_ct,
+                                allow_resume,
+                            ))
                         }
                     } else {
-                        Ok(self.stateless_sse_response(None, receiver, request_ct))
+                        Ok(self.stateless_sse_response(None, receiver, request_ct, allow_resume))
                     }
                 }
                 ClientJsonRpcMessage::Notification(_notification) => {
@@ -2429,11 +2445,8 @@ where
 }
 
 pin_project! {
-    /// Cancels an unpersisted stateless request when its response is dropped.
-    ///
-    /// Persisted requests keep running so another connection can resume them.
-    /// Without an event store, dropping the stream fires the request's
-    /// cancellation token. Natural completion disarms the guard.
+    /// Cancels an in-flight stateless request when its response is dropped.
+    /// Natural completion disarms the guard.
     struct CancelOnDisconnect<S> {
         #[pin]
         inner: S,
