@@ -983,6 +983,45 @@ enum NormalizedOrigin {
     },
 }
 
+fn is_valid_ip_literal(value: &str) -> bool {
+    if value.parse::<std::net::Ipv6Addr>().is_ok() {
+        return true;
+    }
+
+    let Some(version_and_address) = value.strip_prefix('v').or_else(|| value.strip_prefix('V'))
+    else {
+        return false;
+    };
+    let Some((version, address)) = version_and_address.split_once('.') else {
+        return false;
+    };
+
+    !version.is_empty()
+        && version.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !address.is_empty()
+        && address.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'-' | b'.'
+                        | b'_'
+                        | b'~'
+                        | b'!'
+                        | b'$'
+                        | b'&'
+                        | b'\''
+                        | b'('
+                        | b')'
+                        | b'*'
+                        | b'+'
+                        | b','
+                        | b';'
+                        | b'='
+                        | b':'
+                )
+        })
+}
+
 fn parse_origin_value(value: &str) -> Option<NormalizedOrigin> {
     let value = value.trim();
     if value.is_empty() {
@@ -990,6 +1029,43 @@ fn parse_origin_value(value: &str) -> Option<NormalizedOrigin> {
     }
     if value.eq_ignore_ascii_case("null") {
         return Some(NormalizedOrigin::Null);
+    }
+    let (_, serialized_authority) = value.split_once("://")?;
+    if serialized_authority
+        .chars()
+        .any(|character| matches!(character, '@' | '/' | '?' | '#'))
+    {
+        return None;
+    }
+    let valid_port = |port: &str| {
+        !port.is_empty()
+            && port.bytes().all(|byte| byte.is_ascii_digit())
+            && port.parse::<u16>().is_ok()
+    };
+    if let Some(bracketed_authority) = serialized_authority.strip_prefix('[') {
+        let closing_bracket = bracketed_authority.find(']')?;
+        let bracketed_host = &bracketed_authority[..closing_bracket];
+        let suffix = &bracketed_authority[closing_bracket + 1..];
+        if !is_valid_ip_literal(bracketed_host)
+            || (!suffix.is_empty() && !suffix.strip_prefix(':').is_some_and(valid_port))
+        {
+            return None;
+        }
+    } else {
+        if serialized_authority
+            .chars()
+            .any(|character| matches!(character, '[' | ']'))
+        {
+            return None;
+        }
+        if let Some((host, port)) = serialized_authority.split_once(':')
+            && (host.is_empty() || port.contains(':') || !valid_port(port))
+        {
+            return None;
+        }
+    }
+    if serialized_authority.is_empty() {
+        return None;
     }
     let uri = http::Uri::try_from(value).ok()?;
     let scheme = uri.scheme_str()?.to_ascii_lowercase();
@@ -1117,6 +1193,38 @@ mod parse_allowed_origin_tests {
     }
 
     #[test]
+    fn rejects_non_serialized_browser_origins() {
+        for value in [
+            "https://client.example/path",
+            "https://user@client.example",
+            "https://client.example?x=y",
+            "https://client.example#fragment",
+            "https://client.example:65536",
+            "https://client.example:",
+            "https://[not-an-ip]",
+        ] {
+            assert_eq!(parse_origin_value(value), None, "must reject {value}");
+        }
+        assert!(parse_origin_value("https://client.example").is_some());
+    }
+
+    #[test]
+    fn rejects_duplicate_origin_even_when_allowlisted() {
+        let config = StreamableHttpServerConfig::default()
+            .with_allowed_origins(["https://client.example"]);
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("https://client.example"),
+        );
+        headers.append(
+            http::header::ORIGIN,
+            http::HeaderValue::from_static("https://client.example"),
+        );
+        assert!(validate_origin_header(&headers, &config).is_err());
+    }
+
+    #[test]
     fn wildcard_port_parses_as_any() {
         assert_eq!(
             parse_allowed_origin("https://client.example:*"),
@@ -1217,6 +1325,9 @@ fn validate_origin_header(
     headers: &HeaderMap,
     config: &StreamableHttpServerConfig,
 ) -> HttpResult<()> {
+    if headers.get_all(http::header::ORIGIN).iter().take(2).count() > 1 {
+        return Err(forbidden_response("Forbidden: Multiple Origin headers").into());
+    }
     if !config.validate_empty_origin_allowlist && config.allowed_origins.is_empty() {
         return Ok(());
     }
@@ -1499,8 +1610,11 @@ where
         first: Option<ServerJsonRpcMessage>,
         receiver: tokio::sync::mpsc::Receiver<ServerJsonRpcMessage>,
         request_ct: CancellationToken,
+        allow_legacy_resume: bool,
     ) -> BoxResponse {
-        if let Some(event_store) = self.session_manager.event_store() {
+        // MCP 2026-07-28 removed SSE replay; only legacy requests may be
+        // persisted for Last-Event-ID resumability.
+        if allow_legacy_resume && let Some(event_store) = self.session_manager.event_store() {
             let stream = self.persisted_stateless_stream(first, receiver, request_ct, event_store);
             sse_stream_response(
                 stream,
@@ -1590,7 +1704,7 @@ where
             return jsonrpc_message_response(first, status);
         }
 
-        Ok(self.stateless_sse_response(Some(first), receiver, request_ct))
+        Ok(self.stateless_sse_response(Some(first), receiver, request_ct, false))
     }
 
     /// Looks up `name`'s input schema for SEP-2243 `Mcp-Param-*` validation.
@@ -2331,10 +2445,10 @@ where
                                 .body(Full::new(Bytes::from(body)).boxed())
                                 .expect("valid response"))
                         } else {
-                            Ok(self.stateless_sse_response(Some(message), receiver, request_ct))
+                            Ok(self.stateless_sse_response(Some(message), receiver, request_ct, true))
                         }
                     } else {
-                        Ok(self.stateless_sse_response(None, receiver, request_ct))
+                        Ok(self.stateless_sse_response(None, receiver, request_ct, true))
                     }
                 }
                 ClientJsonRpcMessage::Notification(_notification) => {
