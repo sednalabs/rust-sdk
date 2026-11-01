@@ -1210,8 +1210,8 @@ mod parse_allowed_origin_tests {
 
     #[test]
     fn rejects_duplicate_origin_even_when_allowlisted() {
-        let config = StreamableHttpServerConfig::default()
-            .with_allowed_origins(["https://client.example"]);
+        let config =
+            StreamableHttpServerConfig::default().with_allowed_origins(["https://client.example"]);
         let mut headers = HeaderMap::new();
         headers.append(
             http::header::ORIGIN,
@@ -2445,7 +2445,12 @@ where
                                 .body(Full::new(Bytes::from(body)).boxed())
                                 .expect("valid response"))
                         } else {
-                            Ok(self.stateless_sse_response(Some(message), receiver, request_ct, true))
+                            Ok(self.stateless_sse_response(
+                                Some(message),
+                                receiver,
+                                request_ct,
+                                true,
+                            ))
                         }
                     } else {
                         Ok(self.stateless_sse_response(None, receiver, request_ct, true))
