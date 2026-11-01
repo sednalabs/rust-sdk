@@ -1,0 +1,28 @@
+name: Verify RMCP 3.8 security carries
+on:
+  pull_request:
+    paths:
+      - "crates/rmcp/**"
+      - ".github/workflows/verify-transport-carry.yml"
+permissions:
+  contents: read
+jobs:
+  transport:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out unprivileged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Rust 1.99
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+      - name: Check format, compile and modern stream transport regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check -p rmcp --all-targets --features server,transport-streamable-http-server,transport-streamable-http-server-session
+          cargo test -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
