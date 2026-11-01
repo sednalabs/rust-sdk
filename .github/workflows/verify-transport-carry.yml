@@ -44,7 +44,12 @@ jobs:
         with:
           node-version: '22'
       - name: Compile maintained SDK conformance fixture
-        run: cargo build -p mcp-conformance --bin conformance-server --locked
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=1.99.0
+          cargo update
+          cargo build -p mcp-conformance --bin conformance-server
       - name: Run frozen MCP 2026-07-28 server requirements
         shell: bash
         run: |
