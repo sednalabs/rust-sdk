@@ -66,6 +66,7 @@ struct StoredEvent {
 struct InMemoryEventStore {
     events: Arc<RwLock<Vec<StoredEvent>>>,
     next_id: Arc<AtomicU64>,
+    replay_calls: Arc<AtomicU64>,
 }
 
 #[async_trait::async_trait]
@@ -89,6 +90,7 @@ impl EventStore for InMemoryEventStore {
         &self,
         last_event_id: &str,
     ) -> Result<EventStream, EventStoreError> {
+        self.replay_calls.fetch_add(1, Ordering::SeqCst);
         let events = self.events.read().await;
         let last_index = events
             .iter()
@@ -266,8 +268,9 @@ async fn restored_instance_replays_events_from_shared_store() -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
-async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::Result<()> {
+async fn assert_modern_response_is_not_persisted_or_replayable(
+    legacy_session_mode: bool,
+) -> anyhow::Result<()> {
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let event_store = Arc::new(InMemoryEventStore::default());
     let http = reqwest::Client::new();
@@ -277,7 +280,7 @@ async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::R
         session_store.clone(),
         event_store.clone(),
         &cancellation_a,
-        false,
+        legacy_session_mode,
     )
     .await?;
     let original = http
@@ -331,10 +334,22 @@ async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::R
         .send()
         .await?;
     assert_eq!(replay.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(replay.headers().get("allow").unwrap(), "POST");
+    assert_eq!(event_store.replay_calls.load(Ordering::SeqCst), 0);
 
     cancellation_a.cancel();
     server_a.await?;
     Ok(())
+}
+
+#[tokio::test]
+async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::Result<()> {
+    assert_modern_response_is_not_persisted_or_replayable(false).await
+}
+
+#[tokio::test]
+async fn modern_response_with_legacy_sessions_is_not_persisted_or_replayable() -> anyhow::Result<()> {
+    assert_modern_response_is_not_persisted_or_replayable(true).await
 }
 
 #[tokio::test]
