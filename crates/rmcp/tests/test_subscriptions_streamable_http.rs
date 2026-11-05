@@ -29,7 +29,8 @@ use rmcp::{
         streamable_http_server::{
             StreamableHttpServerConfig, StreamableHttpService,
             session::{
-                EventStore, EventStoreError, EventStream, ServerSseMessage, local::LocalSessionManager,
+                EventStore, EventStoreError, EventStream, ServerSseMessage,
+                local::LocalSessionManager,
             },
         },
     },
@@ -245,7 +246,8 @@ async fn modern_http_graceful_close_returns_final_listen_result() -> anyhow::Res
 
 #[tokio::test]
 async fn modern_http_stream_close_without_result_is_abrupt() -> anyhow::Result<()> {
-    let (url, server_ct, _, subscription_started, _) = spawn_server(ServerEnding::Abrupt, None).await;
+    let (url, server_ct, _, subscription_started, _) =
+        spawn_server(ServerEnding::Abrupt, None).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url),
     );
@@ -278,7 +280,8 @@ async fn modern_http_stream_close_without_result_is_abrupt() -> anyhow::Result<(
 #[tokio::test]
 async fn modern_http_lifecycle_stays_sessionless_for_older_application_version()
 -> anyhow::Result<()> {
-    let (url, server_ct, _, _, get_requests) = spawn_server(ServerEnding::ClientCancellation, None).await;
+    let (url, server_ct, _, _, get_requests) =
+        spawn_server(ServerEnding::ClientCancellation, None).await;
     let transport = StreamableHttpClientTransport::from_config(
         StreamableHttpClientTransportConfig::with_uri(url),
     );
