@@ -8,6 +8,8 @@ permissions:
   contents: read
 jobs:
   transport:
+    env:
+      RUSTUP_TOOLCHAIN: 1.99.0
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -15,9 +17,10 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Use Rust 1.99
         run: |
-          rustup toolchain install 1.99.0 --profile minimal
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt
           rustup default 1.99.0
       - name: Check format, compile and modern stream transport regressions
         shell: bash
@@ -26,6 +29,14 @@ jobs:
           cargo fmt --all -- --check
           cargo check -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
           cargo test -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
+      - name: Verify EventStore isolation, legacy replay and disconnect cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test -p rmcp --features client,server,transport-streamable-http-client-reqwest,transport-streamable-http-server,reqwest \
+            --test test_streamable_http_event_store \
+            --test test_subscriptions_streamable_http \
+            --test test_streamable_http_disconnect_cancel
 
   conformance:
     runs-on: ubuntu-24.04
@@ -35,6 +46,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
       - name: Use Rust 1.99
         run: |
           rustup toolchain install 1.99.0 --profile minimal

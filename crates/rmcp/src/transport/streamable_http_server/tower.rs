@@ -1978,7 +1978,10 @@ where
                 .expect("valid response"));
         }
         let request_uses_legacy_protocol = is_legacy_request(None, request.headers())?;
-        let legacy_request = self.config.legacy_session_mode && request_uses_legacy_protocol;
+        if !request_uses_legacy_protocol {
+            return Ok(method_not_allowed_response());
+        }
+        let legacy_request = self.config.legacy_session_mode;
         if !legacy_request {
             let Some(last_event_id) = request
                 .headers()

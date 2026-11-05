@@ -66,6 +66,7 @@ struct StoredEvent {
 struct InMemoryEventStore {
     events: Arc<RwLock<Vec<StoredEvent>>>,
     next_id: Arc<AtomicU64>,
+    replay_calls: Arc<AtomicU64>,
 }
 
 #[async_trait::async_trait]
@@ -89,6 +90,7 @@ impl EventStore for InMemoryEventStore {
         &self,
         last_event_id: &str,
     ) -> Result<EventStream, EventStoreError> {
+        self.replay_calls.fetch_add(1, Ordering::SeqCst);
         let events = self.events.read().await;
         let last_index = events
             .iter()
@@ -266,8 +268,9 @@ async fn restored_instance_replays_events_from_shared_store() -> anyhow::Result<
     Ok(())
 }
 
-#[tokio::test]
-async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result<()> {
+async fn assert_modern_response_is_not_persisted_or_replayable(
+    legacy_session_mode: bool,
+) -> anyhow::Result<()> {
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let event_store = Arc::new(InMemoryEventStore::default());
     let http = reqwest::Client::new();
@@ -277,7 +280,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
         session_store.clone(),
         event_store.clone(),
         &cancellation_a,
-        false,
+        legacy_session_mode,
     )
     .await?;
     let original = http
@@ -300,6 +303,87 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
                         "io.modelcontextprotocol/protocolVersion":"2026-07-28",
                         "io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0"},
                         "io.modelcontextprotocol/clientCapabilities":{}
+                    }
+                }
+            }"#,
+        )
+        .send()
+        .await?;
+    assert_eq!(original.status(), reqwest::StatusCode::OK);
+    assert!(
+        original.headers().get("mcp-session-id").is_none(),
+        "stateless response must not create a session"
+    );
+    let body = tokio::time::timeout(std::time::Duration::from_secs(5), original.text()).await??;
+    assert!(body.contains("notifications/progress"));
+    assert!(body.contains(r#""id":2"#));
+    assert!(
+        !body.lines().any(|line| line.starts_with("id:")),
+        "modern SSE must not expose resumable event IDs: {body}"
+    );
+    assert!(
+        event_store.events.read().await.is_empty(),
+        "modern requests must never reach the event store"
+    );
+
+    let replay = http
+        .get(&url_a)
+        .header("Accept", "text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Last-Event-ID", "event-0")
+        .send()
+        .await?;
+    assert_eq!(replay.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(replay.headers().get("allow").unwrap(), "POST");
+    assert_eq!(event_store.replay_calls.load(Ordering::SeqCst), 0);
+
+    cancellation_a.cancel();
+    server_a.await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::Result<()> {
+    assert_modern_response_is_not_persisted_or_replayable(false).await
+}
+
+#[tokio::test]
+async fn modern_response_with_legacy_sessions_is_not_persisted_or_replayable() -> anyhow::Result<()>
+{
+    assert_modern_response_is_not_persisted_or_replayable(true).await
+}
+
+#[tokio::test]
+async fn legacy_stateless_instance_replays_events_from_shared_store() -> anyhow::Result<()> {
+    let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
+    let event_store = Arc::new(InMemoryEventStore::default());
+    let http = reqwest::Client::new();
+
+    let cancellation_a = CancellationToken::new();
+    let (url_a, server_a) = spawn_server(
+        session_store.clone(),
+        event_store.clone(),
+        &cancellation_a,
+        false,
+    )
+    .await?;
+    let original = http
+        .post(&url_a)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("MCP-Protocol-Version", "2025-06-18")
+        .header("Mcp-Method", "tools/call")
+        .header("Mcp-Name", "slow-progress")
+        .body(
+            r#"{
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{
+                    "name":"slow-progress",
+                    "arguments":{},
+                    "_meta":{
+                        "progressToken":"progress-1"
                     }
                 }
             }"#,
@@ -355,7 +439,7 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
     let replay = http
         .get(&url_b)
         .header("Accept", "text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("MCP-Protocol-Version", "2025-06-18")
         .header("Last-Event-ID", progress_event_id)
         .send()
         .await?;
