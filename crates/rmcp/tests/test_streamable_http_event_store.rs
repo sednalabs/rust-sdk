@@ -14,7 +14,6 @@ use std::{
     },
 };
 
-use futures::StreamExt;
 use rmcp::{
     ErrorData, ServerHandler,
     model::{
@@ -267,7 +266,7 @@ async fn restored_instance_replays_events_from_shared_store() -> anyhow::Result<
 }
 
 #[tokio::test]
-async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result<()> {
+async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::Result<()> {
     let session_store: Arc<dyn SessionStore> = Arc::new(InMemorySessionStore::default());
     let event_store = Arc::new(InMemoryEventStore::default());
     let http = reqwest::Client::new();
@@ -311,62 +310,28 @@ async fn stateless_instance_replays_events_from_shared_store() -> anyhow::Result
         original.headers().get("mcp-session-id").is_none(),
         "stateless response must not create a session"
     );
-    let mut body = original.bytes_stream();
-    let mut received = String::new();
-    let progress_event_id = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let chunk = body
-                .next()
-                .await
-                .expect("response remains open until progress arrives")?;
-            received.push_str(&String::from_utf8_lossy(&chunk));
-            if let Some(event_id) = event_id_containing(&received, "notifications/progress") {
-                return Ok::<_, reqwest::Error>(event_id.to_owned());
-            }
-        }
-    })
-    .await??;
-    drop(body);
+    let body = tokio::time::timeout(std::time::Duration::from_secs(5), original.text()).await??;
+    assert!(body.contains("notifications/progress"));
+    assert!(body.contains(r#""id":2"#));
+    assert!(
+        !body.lines().any(|line| line.starts_with("id:")),
+        "modern SSE must not expose resumable event IDs: {body}"
+    );
+    assert!(
+        event_store.events.read().await.is_empty(),
+        "modern requests must never reach the event store"
+    );
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        loop {
-            let stored_response = event_store.events.read().await.iter().any(|stored| {
-                stored.event.message.as_ref().is_some_and(|message| {
-                    matches!(
-                        message.as_ref(),
-                        rmcp::model::ServerJsonRpcMessage::Response(_)
-                    )
-                })
-            });
-            if stored_response {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-    })
-    .await?;
+    let replay = http
+        .get(&url_a)
+        .header("Accept", "text/event-stream")
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Last-Event-ID", "event-0")
+        .send()
+        .await?;
+    assert_eq!(replay.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
 
     cancellation_a.cancel();
     server_a.await?;
-
-    let cancellation_b = CancellationToken::new();
-    let (url_b, server_b) =
-        spawn_server(session_store, event_store, &cancellation_b, false).await?;
-    let replay = http
-        .get(&url_b)
-        .header("Accept", "text/event-stream")
-        .header("MCP-Protocol-Version", "2026-07-28")
-        .header("Last-Event-ID", progress_event_id)
-        .send()
-        .await?;
-    assert_eq!(replay.status(), reqwest::StatusCode::OK);
-    let replay_body = replay.text().await?;
-    assert!(
-        replay_body.contains(r#""id":2"#),
-        "instance B should replay the stateless response stored by instance A: {replay_body}"
-    );
-
-    cancellation_b.cancel();
-    server_b.await?;
     Ok(())
 }
