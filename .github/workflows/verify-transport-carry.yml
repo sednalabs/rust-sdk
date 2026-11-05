@@ -1,0 +1,78 @@
+name: Verify RMCP 3.8 security carries
+on:
+  pull_request:
+    paths:
+      - "crates/rmcp/**"
+      - ".github/workflows/verify-transport-carry.yml"
+permissions:
+  contents: read
+jobs:
+  transport:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Check out unprivileged source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Rust 1.99
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+      - name: Check format, compile and modern stream transport regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo check -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
+          cargo test -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
+
+  conformance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout patched SDK source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Use Rust 1.99
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal
+          rustup default 1.99.0
+      - name: Set up Node 22 for official MCP conformance CLI
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Compile maintained SDK conformance fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          export RUSTUP_TOOLCHAIN=1.99.0
+          cargo update
+          cargo build -p mcp-conformance --bin conformance-server
+      - name: Run frozen MCP 2026-07-28 server requirements
+        shell: bash
+        run: |
+          set -euo pipefail
+          PORT=8001 target/debug/conformance-server > /tmp/mcp-conformance-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 90); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              tail -n 80 /tmp/mcp-conformance-server.log
+              exit 1
+            fi
+            code=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:8001/mcp || true)
+            if [[ "$code" != "000" ]]; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != "1" ]]; then
+            tail -n 80 /tmp/mcp-conformance-server.log
+            exit 1
+          fi
+          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.12 server \
+            --url http://127.0.0.1:8001/mcp --requirements 2026-07-28
