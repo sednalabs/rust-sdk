@@ -348,7 +348,8 @@ async fn modern_stateless_response_is_not_persisted_or_replayable() -> anyhow::R
 }
 
 #[tokio::test]
-async fn modern_response_with_legacy_sessions_is_not_persisted_or_replayable() -> anyhow::Result<()> {
+async fn modern_response_with_legacy_sessions_is_not_persisted_or_replayable() -> anyhow::Result<()>
+{
     assert_modern_response_is_not_persisted_or_replayable(true).await
 }
 
