@@ -1,4 +1,4 @@
-name: Verify RMCP 3.8 security carries
+name: Verify RMCP security carries
 on:
   pull_request:
     paths:
@@ -29,6 +29,8 @@ jobs:
           cargo fmt --all -- --check
           cargo check -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
           cargo test -p rmcp --lib --features server,transport-streamable-http-server,transport-streamable-http-server-session
+      - name: Verify Events capability and protocol schema
+        run: cargo test -p rmcp --features server,client,schemars --test test_message_schema
       - name: Verify EventStore isolation, legacy replay and disconnect cancellation
         shell: bash
         run: |
