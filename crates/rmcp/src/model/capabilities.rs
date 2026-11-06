@@ -262,7 +262,7 @@ impl ServerCapabilities {
 
 #[cfg(any(feature = "server", feature = "macros"))]
 macro_rules! builder {
-    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?}) => {
+    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?} $(, defaults {$($df:ident: $dv:expr),* $(,)?})?) => {
         paste! {
             #[derive(Default, Clone, Copy, Debug)]
             #[expect(clippy::exhaustive_structs, reason = "intentionally exhaustive")]
@@ -285,6 +285,7 @@ macro_rules! builder {
                 pub fn build(self) -> $Target {
                     $Target {
                         $( $f: self.$f, )*
+                        $($( $df: $dv, )*)?
                     }
                 }
             }
@@ -384,20 +385,12 @@ builder! {
         prompts: PromptsCapability,
         resources: ResourcesCapability,
         tools: ToolsCapability,
-        events: JsonObject,
-    }
+    }, defaults { events: None }
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
-impl<
-    const E: bool,
-    const EXT: bool,
-    const L: bool,
-    const C: bool,
-    const P: bool,
-    const R: bool,
-    const EV: bool,
-> ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, P, R, true, EV>>
+impl<const E: bool, const EXT: bool, const L: bool, const C: bool, const P: bool, const R: bool>
+    ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, P, R, true>>
 {
     pub fn enable_tool_list_changed(mut self) -> Self {
         if let Some(c) = self.tools.as_mut() {
@@ -408,15 +401,8 @@ impl<
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
-impl<
-    const E: bool,
-    const EXT: bool,
-    const L: bool,
-    const C: bool,
-    const R: bool,
-    const T: bool,
-    const EV: bool,
-> ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, true, R, T, EV>>
+impl<const E: bool, const EXT: bool, const L: bool, const C: bool, const R: bool, const T: bool>
+    ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, true, R, T>>
 {
     pub fn enable_prompts_list_changed(mut self) -> Self {
         if let Some(c) = self.prompts.as_mut() {
@@ -427,15 +413,8 @@ impl<
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
-impl<
-    const E: bool,
-    const EXT: bool,
-    const L: bool,
-    const C: bool,
-    const P: bool,
-    const T: bool,
-    const EV: bool,
-> ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, P, true, T, EV>>
+impl<const E: bool, const EXT: bool, const L: bool, const C: bool, const P: bool, const T: bool>
+    ServerCapabilitiesBuilder<ServerCapabilitiesBuilderState<E, EXT, L, C, P, true, T>>
 {
     pub fn enable_resources_list_changed(mut self) -> Self {
         if let Some(c) = self.resources.as_mut() {
@@ -711,8 +690,9 @@ mod test {
 
 #[cfg(test)]
 mod events_capability_tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn events_capability_is_absent_by_default() {
@@ -776,8 +756,7 @@ mod events_capability_tests {
     #[cfg(any(feature = "server", feature = "macros"))]
     #[test]
     fn events_capability_builder_preserves_other_capabilities() {
-        let capabilities = ServerCapabilities::builder()
-            .enable_events()
+        let mut capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_tool_list_changed()
             .enable_prompts()
@@ -786,6 +765,8 @@ mod events_capability_tests {
             .enable_resources_list_changed()
             .enable_resources_subscribe()
             .build();
+        assert!(capabilities.events.is_none());
+        capabilities.events = Some(JsonObject::new());
         assert_eq!(
             serde_json::to_value(capabilities).unwrap(),
             json!({
@@ -795,14 +776,6 @@ mod events_capability_tests {
                 "resources": { "listChanged": true, "subscribe": true }
             })
         );
-        assert!(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_events()
-                .enable_tool_list_changed()
-                .build()
-                .events
-                .is_some()
-        );
+
     }
 }
