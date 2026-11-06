@@ -240,6 +240,14 @@ pub struct ServerCapabilities {
     pub resources: Option<ResourcesCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsCapability>,
+    /// ChatGPT webhook Events capability, advertised as an empty object.
+    ///
+    /// This is distinct from resource subscriptions and `subscriptions/listen`.
+    /// Advertising it does not implement the `events/*` methods or webhook delivery;
+    /// applications must provide those separately.
+    /// See <https://developers.openai.com/plugins/build/mcp-events>.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<JsonObject>,
 }
 
 impl ServerCapabilities {
@@ -254,7 +262,7 @@ impl ServerCapabilities {
 
 #[cfg(any(feature = "server", feature = "macros"))]
 macro_rules! builder {
-    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?}) => {
+    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?} $(, defaults {$($df:ident: $dv:expr),* $(,)?})?) => {
         paste! {
             #[derive(Default, Clone, Copy, Debug)]
             #[expect(clippy::exhaustive_structs, reason = "intentionally exhaustive")]
@@ -277,6 +285,7 @@ macro_rules! builder {
                 pub fn build(self) -> $Target {
                     $Target {
                         $( $f: self.$f, )*
+                        $($( $df: $dv, )*)?
                     }
                 }
             }
@@ -376,7 +385,7 @@ builder! {
         prompts: PromptsCapability,
         resources: ResourcesCapability,
         tools: ToolsCapability,
-    }
+    }, defaults { events: None }
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
@@ -675,6 +684,97 @@ mod test {
         assert_eq!(
             json["extensions"]["io.modelcontextprotocol/oauth-client-credentials"],
             serde_json::json!({})
+        );
+    }
+}
+
+#[cfg(test)]
+mod events_capability_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn events_capability_is_absent_by_default() {
+        let capabilities = ServerCapabilities::default();
+        assert!(capabilities.events.is_none());
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), json!({}));
+        let decoded: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn unknown_capabilities_do_not_enable_events() {
+        let wire = json!({
+            "unknownFutureCapability": {},
+            "tools": {},
+            "experimental": { "vendor.example/events": {} }
+        });
+        let capabilities: ServerCapabilities = serde_json::from_value(wire).unwrap();
+        assert!(capabilities.events.is_none());
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "tools": {},
+                "experimental": { "vendor.example/events": {} }
+            })
+        );
+    }
+
+    #[test]
+    fn null_events_capability_remains_absent() {
+        let capabilities: ServerCapabilities =
+            serde_json::from_value(json!({ "events": null })).unwrap();
+        assert!(capabilities.events.is_none());
+        assert_eq!(serde_json::to_value(capabilities).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn events_capability_round_trips_as_top_level_object() {
+        let capabilities = ServerCapabilities {
+            events: Some(JsonObject::new()),
+            ..Default::default()
+        };
+        let wire = json!({ "events": {} });
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), wire);
+        let decoded: ServerCapabilities = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, capabilities);
+        assert!(decoded.resources.is_none());
+        assert!(decoded.experimental.is_none());
+        assert!(decoded.extensions.is_none());
+    }
+
+    #[test]
+    fn events_capability_rejects_non_object_values() {
+        for events in [json!(true), json!(false), json!(1), json!(""), json!([])] {
+            assert!(
+                serde_json::from_value::<ServerCapabilities>(json!({ "events": events })).is_err()
+            );
+        }
+    }
+
+    #[cfg(any(feature = "server", feature = "macros"))]
+    #[test]
+    fn events_capability_builder_preserves_other_capabilities() {
+        let mut capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .enable_prompts()
+            .enable_prompts_list_changed()
+            .enable_resources()
+            .enable_resources_list_changed()
+            .enable_resources_subscribe()
+            .build();
+        assert!(capabilities.events.is_none());
+        capabilities.events = Some(JsonObject::new());
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "events": {},
+                "tools": { "listChanged": true },
+                "prompts": { "listChanged": true },
+                "resources": { "listChanged": true, "subscribe": true }
+            })
         );
     }
 }

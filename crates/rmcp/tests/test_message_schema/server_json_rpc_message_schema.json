@@ -3172,6 +3172,14 @@
           ],
           "additionalProperties": true
         },
+        "events": {
+          "description": "ChatGPT webhook Events capability, advertised as an empty object.\n\nThis is distinct from resource subscriptions and `subscriptions/listen`.\nAdvertising it does not implement the `events/*` methods or webhook delivery;\napplications must provide those separately.\nSee <https://developers.openai.com/plugins/build/mcp-events>.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true
+        },
         "experimental": {
           "type": [
             "object",
