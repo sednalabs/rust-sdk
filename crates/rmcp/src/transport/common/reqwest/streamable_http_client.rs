@@ -12,6 +12,9 @@ use crate::{
     model::{ClientJsonRpcMessage, JsonRpcMessage, ServerJsonRpcMessage},
     transport::{
         common::{
+            client_side_http::{
+                MAX_ERROR_RESPONSE_SIZE, MAX_JSON_RESPONSE_SIZE, read_bounded_body,
+            },
             client_side_sse::{DEFAULT_MAX_SSE_EVENT_SIZE, bounded_sse_stream},
             http_header::{
                 EVENT_STREAM_MIME_TYPE, HEADER_LAST_EVENT_ID, HEADER_SESSION_ID, JSON_MIME_TYPE,
@@ -277,8 +280,8 @@ impl StreamableHttpClient for reqwest::Client {
             .as_deref()
             .is_some_and(|ct| ct.as_bytes().starts_with(JSON_MIME_TYPE.as_bytes()));
         // Rate limits and non-JSON failures return without reading the body. JSON
-        // server failures are read to keep their JSON-RPC error, so an unfinished
-        // body still blocks here.
+        // server failures are read within MAX_ERROR_RESPONSE_SIZE to preserve
+        // their JSON-RPC error; an oversized body falls back to status metadata.
         let status_error = match (
             http_status_error(status, response.headers()),
             is_json_response,
@@ -312,10 +315,37 @@ impl StreamableHttpClient for reqwest::Client {
         // Non-success responses may carry valid JSON-RPC error payloads that
         // should be surfaced as McpError rather than lost in TransportSend.
         if !status.is_success() {
-            let body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "<failed to read response body>".to_owned());
+            let content_type_header = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .cloned();
+            let body = match read_bounded_body(
+                response.bytes_stream(),
+                content_length,
+                MAX_ERROR_RESPONSE_SIZE,
+            )
+            .await
+            {
+                Ok(body) => {
+                    // Decode only the bounded, in-memory body, using reqwest's
+                    // feature-dependent charset and BOM handling. No network
+                    // stream or Content-Encoding is carried into this response.
+                    let mut buffered = http::Response::new(body);
+                    if let Some(content_type) = content_type_header {
+                        buffered
+                            .headers_mut()
+                            .insert(reqwest::header::CONTENT_TYPE, content_type);
+                    }
+                    reqwest::Response::from(buffered)
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "<failed to read response body>".to_owned())
+                }
+                Err(error @ StreamableHttpError::ResponseBodyTooLarge { .. }) => {
+                    return Err(status_error.map(StreamableHttpError::from).unwrap_or(error));
+                }
+                Err(_) => "<failed to read response body>".to_owned(),
+            };
             // Must precede the JSON-RPC branch below, which would forward a
             // discover rejection with an id the lifecycle cannot correlate.
             if let Some(response) =
@@ -357,7 +387,12 @@ impl StreamableHttpClient for reqwest::Client {
                 // reply. Treat an unusable JSON body as Accepted. A request
                 // still needs a reply; the same body is an error so the worker
                 // does not wait on SSE forever.
-                let body = response.bytes().await?;
+                let body = read_bounded_body(
+                    response.bytes_stream(),
+                    content_length,
+                    MAX_JSON_RESPONSE_SIZE,
+                )
+                .await?;
                 match serde_json::from_slice::<ServerJsonRpcMessage>(&body) {
                     Ok(parsed) => Ok(StreamableHttpPostResponse::Json(parsed, session_id)),
                     Err(e)
@@ -413,7 +448,8 @@ impl StreamableHttpClientTransport<reqwest::Client> {
     ///
     /// The default client follows same-origin 307 and 308 redirects, up to 10
     /// hops. A 301, 302 or 303, or a redirect to another origin, returns an
-    /// error. A 308 does not change the stored URI. To use another redirect
+    /// error. A 308 does not change the stored URI; each followed redirect is
+    /// logged at `debug` level with its old and new path. To use another redirect
     /// policy, pass your own `reqwest::Client` to [`with_client`](Self::with_client).
     ///
     /// # Feature requirement
@@ -470,7 +506,8 @@ const MAX_REDIRECTS: usize = 10;
 /// would replay the session id and caller-supplied custom headers to another
 /// host, so both are returned to the caller as the redirect response instead.
 /// A followed 308 does not update the stored URI, so each request still
-/// starts at the configured one.
+/// starts at the configured one. Each followed hop is logged at `debug` level
+/// so a caller can find the URI to configure instead.
 fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         let preserves_body = matches!(
@@ -486,6 +523,14 @@ fn same_origin_redirect_policy() -> reqwest::redirect::Policy {
         } else if attempt.previous().len() > MAX_REDIRECTS {
             attempt.error(format!("exceeded {MAX_REDIRECTS} redirects"))
         } else {
+            // Only paths are logged: the origin is unchanged, and a query
+            // string may carry credentials.
+            tracing::debug!(
+                status = %attempt.status(),
+                from = attempt.previous().last().map(|url| url.path()).unwrap_or_default(),
+                to = attempt.url().path(),
+                "following same-origin redirect"
+            );
             attempt.follow()
         }
     })

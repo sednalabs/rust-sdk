@@ -5,8 +5,9 @@ use std::marker::PhantomData;
 #[cfg(any(feature = "server", feature = "macros"))]
 use pastey::paste;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
-use super::JsonObject;
+use super::{JsonObject, SkillsCapability};
 pub type ExperimentalCapabilities = BTreeMap<String, JsonObject>;
 
 /// MCP extension capabilities map.
@@ -240,6 +241,14 @@ pub struct ServerCapabilities {
     pub resources: Option<ResourcesCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsCapability>,
+    /// ChatGPT webhook Events capability, advertised as an empty object.
+    ///
+    /// This is distinct from resource subscriptions and `subscriptions/listen`.
+    /// Advertising it does not implement the `events/*` methods or webhook delivery;
+    /// applications must provide those separately.
+    /// See <https://developers.openai.com/plugins/build/mcp-events>.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<JsonObject>,
 }
 
 impl ServerCapabilities {
@@ -250,11 +259,29 @@ impl ServerCapabilities {
             .as_ref()
             .is_some_and(|e| e.contains_key(super::TASKS_EXTENSION_ID))
     }
+
+    /// The settings of the skills extension (SEP-2640), if declared.
+    ///
+    /// Settings that do not parse count as declared with the defaults.
+    pub fn skills(&self) -> Option<SkillsCapability> {
+        let settings = self.extensions.as_ref()?.get(super::SKILLS_EXTENSION_ID)?;
+        Some(serde_json::from_value(Value::Object(settings.clone())).unwrap_or_default())
+    }
+
+    /// Returns `true` if the skills extension (SEP-2640) is declared.
+    pub fn supports_skills(&self) -> bool {
+        self.skills().is_some()
+    }
+
+    /// Returns `true` if the server serves `resources/directory/read`.
+    pub fn supports_directory_read(&self) -> bool {
+        self.skills().is_some_and(|skills| skills.directory_read)
+    }
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
 macro_rules! builder {
-    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?}) => {
+    ($Target: ident {$($(#[$fa:meta])* $f: ident: $T: ty),* $(,)?} $(, defaults {$($df:ident: $dv:expr),* $(,)?})?) => {
         paste! {
             #[derive(Default, Clone, Copy, Debug)]
             #[expect(clippy::exhaustive_structs, reason = "intentionally exhaustive")]
@@ -277,6 +304,7 @@ macro_rules! builder {
                 pub fn build(self) -> $Target {
                     $Target {
                         $( $f: self.$f, )*
+                        $($( $df: $dv, )*)?
                     }
                 }
             }
@@ -376,7 +404,7 @@ builder! {
         prompts: PromptsCapability,
         resources: ResourcesCapability,
         tools: ToolsCapability,
-    }
+    }, defaults { events: None }
 }
 
 #[cfg(any(feature = "server", feature = "macros"))]
@@ -430,6 +458,29 @@ impl<S> ServerCapabilitiesBuilder<S> {
         self.extensions
             .get_or_insert_with(ExtensionCapabilities::new)
             .insert(super::TASKS_EXTENSION_ID.to_string(), JsonObject::new());
+        self
+    }
+
+    /// Declare the skills extension (SEP-2640) without directory reads.
+    ///
+    /// Skills ride on resources: the server must also enable `resources` and
+    /// serve the skill files through `resources/read`.
+    pub fn enable_skills(self) -> Self {
+        self.enable_skills_with(SkillsCapability::new())
+    }
+
+    /// Declare the skills extension (SEP-2640) with `resources/directory/read`.
+    pub fn enable_skills_with_directory_read(self) -> Self {
+        self.enable_skills_with(SkillsCapability::new().with_directory_read())
+    }
+
+    fn enable_skills_with(mut self, skills: SkillsCapability) -> Self {
+        let Ok(Value::Object(settings)) = serde_json::to_value(skills) else {
+            unreachable!("SkillsCapability serializes to an object")
+        };
+        self.extensions
+            .get_or_insert_with(ExtensionCapabilities::new)
+            .insert(super::SKILLS_EXTENSION_ID.to_string(), settings);
         self
     }
 }
@@ -592,6 +643,62 @@ mod test {
     }
 
     #[test]
+    fn enable_skills_declares_the_extension_with_empty_settings() {
+        let server = ServerCapabilities::builder().enable_skills().build();
+        let json = serde_json::to_value(&server).unwrap();
+        assert_eq!(
+            json["extensions"][crate::model::SKILLS_EXTENSION_ID],
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn enable_skills_with_directory_read_declares_the_setting() {
+        let server = ServerCapabilities::builder()
+            .enable_skills_with_directory_read()
+            .build();
+        let json = serde_json::to_value(&server).unwrap();
+        assert_eq!(
+            json["extensions"][crate::model::SKILLS_EXTENSION_ID],
+            serde_json::json!({ "directoryRead": true })
+        );
+    }
+
+    #[test]
+    fn supports_skills_is_false_without_the_extension() {
+        assert!(
+            !ServerCapabilities::builder()
+                .enable_tasks()
+                .build()
+                .supports_skills()
+        );
+    }
+
+    #[test]
+    fn supports_directory_read_is_false_for_plain_skills() {
+        let server = ServerCapabilities::builder().enable_skills().build();
+        assert!(server.supports_skills() && !server.supports_directory_read());
+    }
+
+    #[test]
+    fn skills_reads_directory_read_from_the_wire() {
+        let json = serde_json::json!({
+            "extensions": { crate::model::SKILLS_EXTENSION_ID: { "directoryRead": true } }
+        });
+        let server: ServerCapabilities = serde_json::from_value(json).unwrap();
+        assert!(server.supports_directory_read());
+    }
+
+    #[test]
+    fn skills_treats_malformed_settings_as_declared_with_defaults() {
+        let json = serde_json::json!({
+            "extensions": { crate::model::SKILLS_EXTENSION_ID: { "directoryRead": "yes" } }
+        });
+        let server: ServerCapabilities = serde_json::from_value(json).unwrap();
+        assert_eq!(server.skills(), Some(SkillsCapability::new()));
+    }
+
+    #[test]
     #[allow(deprecated)]
     fn test_client_extensions_capability() {
         // Test building ClientCapabilities with extensions (MCP Apps support)
@@ -675,6 +782,97 @@ mod test {
         assert_eq!(
             json["extensions"]["io.modelcontextprotocol/oauth-client-credentials"],
             serde_json::json!({})
+        );
+    }
+}
+
+#[cfg(test)]
+mod events_capability_tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn events_capability_is_absent_by_default() {
+        let capabilities = ServerCapabilities::default();
+        assert!(capabilities.events.is_none());
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), json!({}));
+        let decoded: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(decoded, capabilities);
+    }
+
+    #[test]
+    fn unknown_capabilities_do_not_enable_events() {
+        let wire = json!({
+            "unknownFutureCapability": {},
+            "tools": {},
+            "experimental": { "vendor.example/events": {} }
+        });
+        let capabilities: ServerCapabilities = serde_json::from_value(wire).unwrap();
+        assert!(capabilities.events.is_none());
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "tools": {},
+                "experimental": { "vendor.example/events": {} }
+            })
+        );
+    }
+
+    #[test]
+    fn null_events_capability_remains_absent() {
+        let capabilities: ServerCapabilities =
+            serde_json::from_value(json!({ "events": null })).unwrap();
+        assert!(capabilities.events.is_none());
+        assert_eq!(serde_json::to_value(capabilities).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn events_capability_round_trips_as_top_level_object() {
+        let capabilities = ServerCapabilities {
+            events: Some(JsonObject::new()),
+            ..Default::default()
+        };
+        let wire = json!({ "events": {} });
+        assert_eq!(serde_json::to_value(&capabilities).unwrap(), wire);
+        let decoded: ServerCapabilities = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, capabilities);
+        assert!(decoded.resources.is_none());
+        assert!(decoded.experimental.is_none());
+        assert!(decoded.extensions.is_none());
+    }
+
+    #[test]
+    fn events_capability_rejects_non_object_values() {
+        for events in [json!(true), json!(false), json!(1), json!(""), json!([])] {
+            assert!(
+                serde_json::from_value::<ServerCapabilities>(json!({ "events": events })).is_err()
+            );
+        }
+    }
+
+    #[cfg(any(feature = "server", feature = "macros"))]
+    #[test]
+    fn events_capability_builder_preserves_other_capabilities() {
+        let mut capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_tool_list_changed()
+            .enable_prompts()
+            .enable_prompts_list_changed()
+            .enable_resources()
+            .enable_resources_list_changed()
+            .enable_resources_subscribe()
+            .build();
+        assert!(capabilities.events.is_none());
+        capabilities.events = Some(JsonObject::new());
+        assert_eq!(
+            serde_json::to_value(capabilities).unwrap(),
+            json!({
+                "events": {},
+                "tools": { "listChanged": true },
+                "prompts": { "listChanged": true },
+                "resources": { "listChanged": true, "subscribe": true }
+            })
         );
     }
 }
