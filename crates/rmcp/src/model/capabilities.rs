@@ -776,6 +776,5 @@ mod events_capability_tests {
                 "resources": { "listChanged": true, "subscribe": true }
             })
         );
-
     }
 }
