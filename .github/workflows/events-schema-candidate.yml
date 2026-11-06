@@ -1,0 +1,37 @@
+name: Export Events schema candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/events-schema-candidate.yml
+
+permissions:
+  contents: read
+
+jobs:
+  schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate and verify existing schema snapshots
+        run: |
+          UPDATE_SCHEMA=1 cargo test -p rmcp --all-features --test test_message_schema
+          cargo test -p rmcp --all-features --test test_message_schema
+          git rev-parse HEAD > schema-source-sha.txt
+          git diff --stat
+      - uses: actions/upload-artifact@v7
+        with:
+          name: events-schema-candidate
+          if-no-files-found: error
+          retention-days: 1
+          path: |
+            schema-source-sha.txt
+            crates/rmcp/tests/test_message_schema/server_json_rpc_message_schema.json
+            crates/rmcp/tests/test_message_schema/client_json_rpc_message_schema.json
