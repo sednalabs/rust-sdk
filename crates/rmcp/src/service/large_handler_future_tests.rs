@@ -175,7 +175,10 @@ async fn large_resource_future_preserves_context_and_cancellation() {
     };
     // A cancelled handler's result must not leak onto the response stream.
     assert_eq!(response.id, RequestId::Number(20));
-    assert!(matches!(response.result, ServerResult::ReadResourceResult(_)));
+    assert!(matches!(
+        response.result,
+        ServerResult::ReadResourceResult(_)
+    ));
     // Normal response completion also retires/cancels its request token.
     assert!(completed_token.is_cancelled());
     assert!(!service_token.is_cancelled());
