@@ -1607,12 +1607,13 @@ where
                         let handler_id = id.clone();
                         let handler_version = context.meta.protocol_version();
                         spawn_service_task(async move {
+                            // Bound moves through nested task-local scopes for large handler futures.
                             let result = ORIGINATING_REQUEST
                                 .scope(
                                     handler_id,
                                     ORIGINATING_PROTOCOL_VERSION.scope(
                                         handler_version,
-                                        service.handle_request(request, context),
+                                        Box::pin(service.handle_request(request, context)),
                                     ),
                                 )
                                 .await;
@@ -1949,3 +1950,6 @@ mod sep2260_marker_tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "server", feature = "client", not(feature = "local")))]
+mod large_handler_future_tests;
