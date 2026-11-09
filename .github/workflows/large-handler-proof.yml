@@ -24,25 +24,37 @@ jobs:
           test -z "${RUST_MIN_STACK:-}"
           cargo fmt --all -- --check
           cargo test -p rmcp --lib --features client service::large_handler_future_tests::large_resource_future_preserves_context_and_cancellation -- --exact --nocapture
-      - name: Verify the same fixture exposes the unboxed baseline
+      - name: Calibrate default-stack red-green fixture without changing runtime limits
         env:
           RUSTUP_TOOLCHAIN: 1.99.0
         run: |
           set -euo pipefail
           cp crates/rmcp/src/service.rs /tmp/bounded-service.rs
-          trap 'cp /tmp/bounded-service.rs crates/rmcp/src/service.rs' EXIT
+          cp crates/rmcp/src/service/large_handler_future_tests.rs /tmp/large-handler-test.rs
+          trap 'cp /tmp/bounded-service.rs crates/rmcp/src/service.rs; cp /tmp/large-handler-test.rs crates/rmcp/src/service/large_handler_future_tests.rs' EXIT
           python3 - <<'PY'
           from pathlib import Path
-          path = Path("crates/rmcp/src/service.rs")
-          source = path.read_text()
+          import subprocess
+          service = Path("crates/rmcp/src/service.rs")
+          test = Path("crates/rmcp/src/service/large_handler_future_tests.rs")
+          fixed = service.read_text()
+          fixture = test.read_text()
           needle = "Box::pin(service.handle_request(request, context))"
-          assert source.count(needle) == 1
-          path.write_text(source.replace(needle, "service.handle_request(request, context)"))
+          assert fixed.count(needle) == 1
+          assert fixture.count("const HANDLER_BYTES: usize = 128 * 1024;") == 1
+          command = ["cargo", "test", "-p", "rmcp", "--lib", "--features", "client", "service::large_handler_future_tests::large_resource_future_preserves_context_and_cancellation", "--", "--exact", "--nocapture"]
+          for size in (192, 256, 384, 512):
+              test.write_text(fixture.replace("const HANDLER_BYTES: usize = 128 * 1024;", f"const HANDLER_BYTES: usize = {size} * 1024;"))
+              outcomes = {}
+              for label, source in (("fixed", fixed), ("baseline", fixed.replace(needle, "service.handle_request(request, context)"))):
+                  service.write_text(source)
+                  result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                  outcomes[label] = result
+                  print(f"CALIBRATION size_kib={size} variant={label} exit={result.returncode}", flush=True)
+                  print(result.stdout, flush=True)
+              if outcomes["fixed"].returncode == 0 and outcomes["baseline"].returncode != 0 and "stack overflow" in outcomes["baseline"].stdout:
+                  print(f"PROVEN_DEFAULT_STACK_FIXTURE_KIB={size}", flush=True)
+                  break
+          else:
+              raise SystemExit("No baseline-red/fixed-green fixture size found")
           PY
-          set +e
-          cargo test -p rmcp --lib --features client service::large_handler_future_tests::large_resource_future_preserves_context_and_cancellation -- --exact --nocapture > /tmp/unboxed-baseline.log 2>&1
-          status=$?
-          set -e
-          cat /tmp/unboxed-baseline.log
-          test "$status" -ne 0
-          grep -q 'stack overflow' /tmp/unboxed-baseline.log
