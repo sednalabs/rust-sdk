@@ -24,8 +24,8 @@ use crate::{
 
 const WAIT: Duration = Duration::from_secs(5);
 // Deliberately inline across suspension, like a large application dispatcher.
-// Confirm baseline-red/fixed-green with this exact value before landing.
-const HANDLER_BYTES: usize = 128 * 1024;
+// This size exposes the unboxed dispatch regression on the default test stack.
+const HANDLER_BYTES: usize = 256 * 1024;
 
 struct LargeResourceServer {
     started: mpsc::UnboundedSender<(RequestId, CancellationToken)>,
