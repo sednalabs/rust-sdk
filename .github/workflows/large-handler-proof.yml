@@ -1,0 +1,48 @@
+name: Temporary large-handler red-green proof
+on:
+  pull_request:
+    branches: [baseline/rmcp-3-8-0-20261101]
+permissions:
+  contents: read
+jobs:
+  bounded-dispatch:
+    if: github.event.pull_request.head.ref == 'fix/box-request-dispatch-futures' && github.event.pull_request.head.repo.full_name == 'sednalabs/rust-sdk'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Use Rust 1.99
+        run: rustup toolchain install 1.99.0 --profile minimal --component rustfmt
+      - name: Verify unchanged default stack and fixed behavior
+        env:
+          RUSTUP_TOOLCHAIN: 1.99.0
+        run: |
+          set -euo pipefail
+          test -z "${RUST_MIN_STACK:-}"
+          cargo fmt --all -- --check
+          cargo test -p rmcp --lib --features client service::large_handler_future_tests::large_resource_future_preserves_context_and_cancellation -- --exact --nocapture
+      - name: Verify the same fixture exposes the unboxed baseline
+        env:
+          RUSTUP_TOOLCHAIN: 1.99.0
+        run: |
+          set -euo pipefail
+          cp crates/rmcp/src/service.rs /tmp/bounded-service.rs
+          trap 'cp /tmp/bounded-service.rs crates/rmcp/src/service.rs' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("crates/rmcp/src/service.rs")
+          source = path.read_text()
+          needle = "Box::pin(service.handle_request(request, context))"
+          assert source.count(needle) == 1
+          path.write_text(source.replace(needle, "service.handle_request(request, context)"))
+          PY
+          set +e
+          cargo test -p rmcp --lib --features client service::large_handler_future_tests::large_resource_future_preserves_context_and_cancellation -- --exact --nocapture > /tmp/unboxed-baseline.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/unboxed-baseline.log
+          test "$status" -ne 0
+          grep -q 'stack overflow' /tmp/unboxed-baseline.log
