@@ -3,6 +3,7 @@
 #![doc = include_str!("../README.md")]
 
 mod error;
+mod time_util;
 pub use error::{ErrorData, RmcpError};
 
 /// Basic data types in MCP specification

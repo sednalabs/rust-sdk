@@ -90,7 +90,7 @@ impl McpOAuthStore {
             client_id,
             scope,
             _state: state,
-            _created_at: chrono::Utc::now(),
+            _created_at: time::OffsetDateTime::now_utc(),
             auth_token: None,
         };
 
@@ -154,7 +154,7 @@ struct AuthSession {
     client_id: String,
     scope: Option<String>,
     _state: Option<String>,
-    _created_at: chrono::DateTime<chrono::Utc>,
+    _created_at: time::OffsetDateTime,
     auth_token: Option<AuthToken>,
 }
 
